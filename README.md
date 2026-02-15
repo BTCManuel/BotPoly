@@ -40,6 +40,17 @@ python -m bot run --mode paper
 python -m bot run --mode live
 ```
 
+Zeitlich begrenzt laufen lassen (z. B. 1h / 24h):
+```bash
+python -m bot run --mode paper --hours 1
+python -m bot run --mode paper --hours 24
+```
+
+Einfache Ergebnis-Auswertung (Orders + Realized PnL):
+```bash
+python -m bot report --mode paper
+```
+
 ## Discovery: Token IDs
 1. Bot versucht automatisch aktive BTC Up/Down Märkte über Gamma API zu finden.
 2. Erkennt die Token IDs aus Outcomes (`up`, `down`).

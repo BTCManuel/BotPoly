@@ -17,7 +17,7 @@ from bot.strategy import choose_signal
 from bot.types import Decision, Position
 
 
-async def run_bot(settings: Settings) -> None:
+async def run_bot(settings: Settings, max_runtime_seconds: int | None = None) -> None:
     log = structlog.get_logger("bot")
     storage = Storage(settings.sqlite_path)
     await storage.init()
@@ -102,4 +102,15 @@ async def run_bot(settings: Settings) -> None:
 
             log.info("decision", decision=signal.decision.value, edge=signal.edge, reason=signal.reason_code)
 
-    await asyncio.gather(binance.run(), poly.run(), decision_loop())
+    tasks = [asyncio.create_task(binance.run()), asyncio.create_task(poly.run()), asyncio.create_task(decision_loop())]
+    try:
+        if max_runtime_seconds and max_runtime_seconds > 0:
+            await asyncio.sleep(max_runtime_seconds)
+            log.info("max_runtime_reached", seconds=max_runtime_seconds)
+        else:
+            await asyncio.gather(*tasks)
+            return
+    finally:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
