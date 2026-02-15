@@ -30,6 +30,7 @@ Wichtige Parameter für Debug/Trading-Frequenz:
 - `MAX_SPREAD` (z. B. `0.02` bis `0.03`)
 - `LOOP_INTERVAL_SECONDS` (default `1.0`)
 - `ROTATE_INTERVAL_SECONDS` (default `300`)
+- `QUOTE_PRINT_INTERVAL_SECONDS` (default `60`)
 - `PAPER_FILL_EPSILON` (default `0.0`)
 - `ALLOW_CROSS_WINDOW_POSITIONS` (default `false`)
 - `MARKET_DISCOVERY_FALLBACK_SECONDS` (default `120`)
@@ -38,6 +39,8 @@ Wichtige Parameter für Debug/Trading-Frequenz:
 ```bash
 python -m bot run --mode paper --hours 0.17 --verbose
 ```
+
+Hinweis: Quotes werden zusätzlich automatisch im Intervall `QUOTE_PRINT_INTERVAL_SECONDS` (default jede Minute) ausgegeben.
 
 oder explizit live:
 ```bash
