@@ -34,6 +34,8 @@ async def discover_btc_up_down_market(settings: Settings) -> MarketDiscoveryResu
             return scheduled_market
 
         data = await _fetch_active_markets(session)
+        if not data:
+            return None
 
     now_iso = datetime.now(timezone.utc).isoformat()
 
@@ -144,9 +146,12 @@ async def _fetch_active_markets(session: aiohttp.ClientSession) -> list[dict]:
     url = "https://gamma-api.polymarket.com/markets"
     params = {"active": "true", "limit": "200"}
 
-    async with session.get(url, params=params, timeout=20) as resp:
-        resp.raise_for_status()
-        payload = await resp.json()
+    try:
+        async with session.get(url, params=params, timeout=20) as resp:
+            resp.raise_for_status()
+            payload = await resp.json()
+    except (aiohttp.ClientError, TimeoutError):
+        return []
 
     return payload if isinstance(payload, list) else []
 

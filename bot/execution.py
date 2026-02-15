@@ -53,10 +53,24 @@ class Executor:
                     client.set_api_creds(creds)
         return client
 
-    async def place_limit(self, token_id: str, side: str, price: float, size: float, best_ask: float | None = None) -> ExecutionResult:
+    async def place_limit(
+        self,
+        token_id: str,
+        side: str,
+        price: float,
+        size: float,
+        best_bid: float | None = None,
+        best_ask: float | None = None,
+    ) -> ExecutionResult:
         order_id = str(uuid.uuid4())
         if self.mode == "paper":
-            status = "filled" if (side == "buy" and best_ask is not None and price >= best_ask) else "open"
+            eps = self.settings.paper_fill_epsilon
+            if side == "buy" and best_ask is not None and price >= (best_ask - eps):
+                status = "filled"
+            elif side == "sell" and best_bid is not None and price <= (best_bid + eps):
+                status = "filled"
+            else:
+                status = "open"
             return ExecutionResult(order_id=order_id, status=status, price=price, size=size)
 
         if self.client is None:

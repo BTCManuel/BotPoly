@@ -16,6 +16,7 @@ def parse_args() -> argparse.Namespace:
     run = sub.add_parser("run", help="Run trading bot")
     run.add_argument("--mode", choices=["paper", "live"], default=None, help="Override MODE from env")
     run.add_argument("--hours", type=float, default=None, help="Auto-stop after N hours (e.g. 1 or 24)")
+    run.add_argument("--verbose", action="store_true", help="Enable human-readable live decision logs")
 
     report = sub.add_parser("report", help="Print simple PnL/order summary from SQLite")
     report.add_argument("--mode", choices=["paper", "live"], default=None, help="Mode filter for orders")
@@ -30,6 +31,7 @@ def main() -> None:
 
     configure_logging(settings.log_level)
     if args.command == "run":
+        settings.verbose = bool(args.verbose)
         max_runtime_seconds = int(args.hours * 3600) if args.hours and args.hours > 0 else None
         asyncio.run(run_bot(settings, max_runtime_seconds=max_runtime_seconds))
     elif args.command == "report":
@@ -38,7 +40,9 @@ def main() -> None:
         print(f"orders_total={report.total_orders}")
         print(f"orders_buy={report.buy_orders}")
         print(f"orders_sell={report.sell_orders}")
-        print(f"open_buy_positions={report.open_buys}")
+        print(f"fills_total={report.fills_total}")
+        print(f"positions_open={report.open_positions}")
+        print(f"positions_closed={report.closed_positions}")
         print(f"realized_pnl_usd={report.realized_pnl_usd:.4f}")
 
 
