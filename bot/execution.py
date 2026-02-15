@@ -64,10 +64,9 @@ class Executor:
     ) -> ExecutionResult:
         order_id = str(uuid.uuid4())
         if self.mode == "paper":
-            eps = self.settings.paper_fill_epsilon
-            if side == "buy" and best_ask is not None and price >= (best_ask - eps):
+            if side == "buy" and best_ask is not None and price >= best_ask:
                 status = "filled"
-            elif side == "sell" and best_bid is not None and price <= (best_bid + eps):
+            elif side == "sell" and best_bid is not None and price <= best_bid:
                 status = "filled"
             else:
                 status = "open"

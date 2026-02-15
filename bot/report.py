@@ -20,6 +20,12 @@ def _table_exists(cur: sqlite3.Cursor, table_name: str) -> bool:
     return cur.fetchone() is not None
 
 
+def _column_exists(cur: sqlite3.Cursor, table_name: str, column_name: str) -> bool:
+    cur.execute(f"PRAGMA table_info({table_name})")
+    cols = [row[1] for row in cur.fetchall()]
+    return column_name in cols
+
+
 def build_session_report(db_path: str, mode: str) -> SessionReport:
     with sqlite3.connect(db_path) as conn:
         cur = conn.cursor()
@@ -29,20 +35,34 @@ def build_session_report(db_path: str, mode: str) -> SessionReport:
         realized_pnl = 0.0
 
         if _table_exists(cur, "orders"):
-            cur.execute("SELECT COUNT(*) FROM orders WHERE mode = ?", (mode,))
+            has_mode = _column_exists(cur, "orders", "mode")
+            if has_mode:
+                cur.execute("SELECT COUNT(*) FROM orders WHERE mode = ?", (mode,))
+            else:
+                cur.execute("SELECT COUNT(*) FROM orders")
             total_orders = int(cur.fetchone()[0])
 
-            cur.execute("SELECT COUNT(*) FROM orders WHERE mode = ? AND side = 'buy'", (mode,))
+            if has_mode:
+                cur.execute("SELECT COUNT(*) FROM orders WHERE mode = ? AND side = 'buy'", (mode,))
+            else:
+                cur.execute("SELECT COUNT(*) FROM orders WHERE side = 'buy'")
             buy_orders = int(cur.fetchone()[0])
 
-            cur.execute("SELECT COUNT(*) FROM orders WHERE mode = ? AND side = 'sell'", (mode,))
+            if has_mode:
+                cur.execute("SELECT COUNT(*) FROM orders WHERE mode = ? AND side = 'sell'", (mode,))
+            else:
+                cur.execute("SELECT COUNT(*) FROM orders WHERE side = 'sell'")
             sell_orders = int(cur.fetchone()[0])
 
         if _table_exists(cur, "fills") and _table_exists(cur, "orders"):
-            cur.execute(
-                "SELECT COUNT(*) FROM fills WHERE order_id IN (SELECT id FROM orders WHERE mode = ?)",
-                (mode,),
-            )
+            has_mode = _column_exists(cur, "orders", "mode")
+            if has_mode:
+                cur.execute(
+                    "SELECT COUNT(*) FROM fills WHERE order_id IN (SELECT id FROM orders WHERE mode = ?)",
+                    (mode,),
+                )
+            else:
+                cur.execute("SELECT COUNT(*) FROM fills")
             fills_total = int(cur.fetchone()[0])
 
         if _table_exists(cur, "positions"):

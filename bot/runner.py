@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 import structlog
 
 from bot.config import Settings
-from bot.discovery import MarketDiscoveryResult, discover_btc_up_down_market
+from bot.discovery import discover_btc_up_down_market
 from bot.execution import Executor
 from bot.feeds.binance import BinanceFeed
 from bot.feeds.polymarket_ws import PolymarketMarketFeed
@@ -66,7 +66,8 @@ async def run_bot(settings: Settings, max_runtime_seconds: int | None = None) ->
             if new_market:
                 last_valid_market = new_market
                 last_market_ok = now
-                if new_market.market_slug != prev.market_slug:
+                token_changed = (new_market.up_token_id != prev.up_token_id) or (new_market.down_token_id != prev.down_token_id)
+                if new_market.market_slug != prev.market_slug or token_changed:
                     active_market = new_market
                     poly.switch_market(new_market.up_token_id, new_market.down_token_id)
                     log.info(
@@ -90,28 +91,54 @@ async def run_bot(settings: Settings, max_runtime_seconds: int | None = None) ->
         nonlocal position
         while True:
             await asyncio.sleep(settings.loop_interval_seconds)
-            if not binance.latest_price or not poly.up_quote or not poly.down_quote:
+            ts = datetime.now(timezone.utc).timestamp()
+            btc_price = binance.latest_price
+
+            up_quote = poly.up_quote
+            down_quote = poly.down_quote
+            if not btc_price or not up_quote or not down_quote:
+                reason = "no_orderbook"
+                stats.reason_counts[reason] += 1
+                await storage.execute(
+                    "INSERT INTO ticks (ts, btc_price, up_mid, down_mid, p_model, decision, edge, reason) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (ts, btc_price or 0.0, 0.0, 0.0, 0.0, Decision.HOLD.value, 0.0, reason),
+                )
+                if settings.verbose:
+                    print(
+                        f"[{datetime.now(timezone.utc).isoformat()}] BTC={_fmt(btc_price or 0.0)} "
+                        "UP(mid=0.0000, spread=0.0000) DOWN(mid=0.0000, spread=0.0000) "
+                        "p_model=0.0000 edge_up=0.0000 edge_down=0.0000 decision=hold reason=no_orderbook"
+                    )
+                continue
+
+            if up_quote.bid is None or up_quote.ask is None or down_quote.bid is None or down_quote.ask is None:
+                reason = "no_orderbook"
+                stats.reason_counts[reason] += 1
+                await storage.execute(
+                    "INSERT INTO ticks (ts, btc_price, up_mid, down_mid, p_model, decision, edge, reason) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (ts, btc_price, 0.0, 0.0, 0.0, Decision.HOLD.value, 0.0, reason),
+                )
                 continue
 
             p_model = model.predict_up_probability(binance.prices)
             signal = choose_signal(
                 p_up_model=p_model,
-                up_mid=poly.up_quote.mid,
+                up_mid=up_quote.mid,
                 edge_min=settings.edge_min,
                 max_spread=settings.max_spread,
-                up_spread=poly.up_quote.spread,
-                down_spread=poly.down_quote.spread,
+                up_spread=up_quote.spread,
+                down_spread=down_quote.spread,
             )
 
             stats.edge_up.append(signal.edge_up)
             stats.edge_down.append(signal.edge_down)
-            stats.spread_up.append(poly.up_quote.spread)
-            stats.spread_down.append(poly.down_quote.spread)
+            stats.spread_up.append(up_quote.spread)
+            stats.spread_down.append(down_quote.spread)
             reason = signal.reason_code
 
             if signal.decision != Decision.HOLD and position and not settings.allow_cross_window_positions:
                 reason = "position_open_old_window"
-                signal = choose_signal(p_model, poly.up_quote.mid, 9999, settings.max_spread, poly.up_quote.spread, poly.down_quote.spread)
+                signal = choose_signal(p_model, up_quote.mid, 9999, settings.max_spread, up_quote.spread, down_quote.spread)
 
             can_open, risk_reason = risk.can_open(settings.order_size_usd)
             if signal.decision != Decision.HOLD and not can_open:
@@ -119,42 +146,28 @@ async def run_bot(settings: Settings, max_runtime_seconds: int | None = None) ->
 
             stats.reason_counts[reason] += 1
 
-            await storage.execute(
-                "INSERT INTO ticks VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (
-                    datetime.now(timezone.utc).isoformat(),
-                    active_market.market_slug,
-                    active_market.up_token_id,
-                    active_market.down_token_id,
-                    binance.latest_price,
-                    poly.up_quote.bid,
-                    poly.up_quote.ask,
-                    poly.up_quote.mid,
-                    poly.down_quote.bid,
-                    poly.down_quote.ask,
-                    poly.down_quote.mid,
-                    signal.p_up_model,
-                    signal.p_up_mkt,
-                    signal.p_down_mkt,
-                    signal.edge_up,
-                    signal.edge_down,
-                    signal.decision.value,
-                    reason,
-                ),
-            )
-
             if settings.verbose:
                 print(
-                    f"{datetime.now(timezone.utc).isoformat()} slug={active_market.market_slug} "
-                    f"UP={active_market.up_token_id} DOWN={active_market.down_token_id} "
-                    f"btc={_fmt(binance.latest_price)} up(b/a/m)={_fmt(poly.up_quote.bid)}/{_fmt(poly.up_quote.ask)}/{_fmt(poly.up_quote.mid)} "
-                    f"dn(b/a/m)={_fmt(poly.down_quote.bid)}/{_fmt(poly.down_quote.ask)}/{_fmt(poly.down_quote.mid)} "
-                    f"p_model={_fmt(signal.p_up_model)} p_mkt={_fmt(signal.p_up_mkt)} edge_up={_fmt(signal.edge_up)} edge_dn={_fmt(signal.edge_down)} "
-                    f"spr_up={_fmt(poly.up_quote.spread)} spr_dn={_fmt(poly.down_quote.spread)} dec={signal.decision.value} reason={reason}"
+                    f"[{datetime.now(timezone.utc).isoformat()}] BTC={_fmt(btc_price)} "
+                    f"UP(mid={_fmt(up_quote.mid)}, spread={_fmt(up_quote.spread)}) "
+                    f"DOWN(mid={_fmt(down_quote.mid)}, spread={_fmt(down_quote.spread)}) "
+                    f"p_model={_fmt(signal.p_up_model)} edge_up={_fmt(signal.edge_up)} edge_down={_fmt(signal.edge_down)} "
+                    f"decision={signal.decision.value} reason={reason}"
                 )
 
+            await storage.execute(
+                "INSERT INTO ticks (ts, btc_price, up_mid, down_mid, p_model, decision, edge, reason) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (ts, btc_price, up_quote.mid, down_quote.mid, signal.p_up_model, signal.decision.value, signal.edge, reason),
+            )
+
             if position:
-                quote = poly.up_quote if position.token_id == active_market.up_token_id else poly.down_quote
+                if position.token_id == active_market.up_token_id:
+                    quote = up_quote
+                elif position.token_id == active_market.down_token_id:
+                    quote = down_quote
+                else:
+                    continue
+
                 elapsed = (datetime.now(timezone.utc) - position.entry_ts).total_seconds()
                 target = position.entry_price * (1 + settings.profit_take_bps / 10000)
                 exit_reason = None
@@ -164,62 +177,79 @@ async def run_bot(settings: Settings, max_runtime_seconds: int | None = None) ->
                     exit_reason = "time_stop"
                 if exit_reason:
                     sell = await executor.place_limit(position.token_id, "sell", quote.bid, position.qty, best_bid=quote.bid)
+                    now_ts = datetime.now(timezone.utc).timestamp()
                     await storage.execute(
-                        "INSERT INTO orders VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                        "INSERT INTO orders (id, market_slug, token_id, side, price, size, status, reason, created_ts, updated_ts) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                         (
                             sell.order_id,
                             position.market_slug,
-                            settings.mode.value,
                             position.token_id,
                             "sell",
                             sell.price,
                             sell.size,
                             sell.status,
                             exit_reason,
-                            executor.now_iso(),
-                            executor.now_iso(),
+                            now_ts,
+                            now_ts,
                         ),
                     )
                     if sell.status == "filled":
-                        await storage.execute("INSERT INTO fills (order_id, ts, fill_price, fill_size) VALUES (?,?,?,?)", (sell.order_id, executor.now_iso(), sell.price, sell.size))
-                    pnl = (sell.price - position.entry_price) * position.qty
-                    risk.on_close(position.entry_price * position.qty, pnl)
-                    await storage.execute("UPDATE positions SET closed_ts = ?, exit_reason = ? WHERE id = (SELECT id FROM positions WHERE token_id = ? AND closed_ts IS NULL ORDER BY opened_ts DESC LIMIT 1)", (executor.now_iso(), exit_reason, position.token_id))
-                    await storage.execute("INSERT INTO pnl VALUES (?,?,?,?)", (executor.now_iso(), risk.state.realized_pnl_usd, 0.0, risk.state.exposure_usd))
-                    if settings.verbose:
-                        print(f"EXIT {exit_reason} token={position.token_id} price={sell.price:.4f} pnl={pnl:.4f} status={sell.status}")
-                    position = None
+                        await storage.execute(
+                            "INSERT INTO fills (order_id, fill_price, fill_size, ts) VALUES (?, ?, ?, ?)",
+                            (sell.order_id, sell.price, sell.size, now_ts),
+                        )
+                        pnl = (sell.price - position.entry_price) * position.qty
+                        risk.on_close(position.entry_price * position.qty, pnl)
+                        await storage.execute(
+                            "UPDATE positions SET closed_ts = ?, exit_reason = ? WHERE id = (SELECT id FROM positions WHERE token_id = ? AND closed_ts IS NULL ORDER BY opened_ts DESC LIMIT 1)",
+                            (now_ts, exit_reason, position.token_id),
+                        )
+                        await storage.execute(
+                            "INSERT INTO pnl (ts, realized, unrealized) VALUES (?, ?, ?)",
+                            (now_ts, risk.state.realized_pnl_usd, 0.0),
+                        )
+                        if settings.verbose:
+                            print(
+                                f"TRADE EXECUTED: side=sell price={sell.price:.4f} size={sell.size:.4f} status={sell.status}"
+                            )
+                        position = None
                 continue
 
             if signal.decision == Decision.HOLD or not can_open:
                 if signal.decision != Decision.HOLD and not can_open:
-                    await storage.execute("INSERT INTO errors VALUES (?,?,?)", (executor.now_iso(), "risk", risk_reason))
+                    await storage.execute(
+                        "INSERT INTO errors (ts, source, message) VALUES (?, ?, ?)",
+                        (datetime.now(timezone.utc).timestamp(), "risk", risk_reason),
+                    )
                 continue
 
             buy_token_id = active_market.up_token_id if signal.decision == Decision.BUY_UP else active_market.down_token_id
-            quote = poly.up_quote if signal.decision == Decision.BUY_UP else poly.down_quote
+            quote = up_quote if signal.decision == Decision.BUY_UP else down_quote
             limit_price = quote.ask
             qty = settings.order_size_usd / max(limit_price, 0.01)
 
             result = await executor.place_limit(buy_token_id, "buy", limit_price, qty, best_ask=quote.ask)
+            now_ts = datetime.now(timezone.utc).timestamp()
             await storage.execute(
-                "INSERT INTO orders VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO orders (id, market_slug, token_id, side, price, size, status, reason, created_ts, updated_ts) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     result.order_id,
                     active_market.market_slug,
-                    settings.mode.value,
                     buy_token_id,
                     "buy",
                     result.price,
                     result.size,
                     result.status,
-                    signal.reason_code,
-                    executor.now_iso(),
-                    executor.now_iso(),
+                    reason,
+                    now_ts,
+                    now_ts,
                 ),
             )
             if result.status == "filled":
-                await storage.execute("INSERT INTO fills (order_id, ts, fill_price, fill_size) VALUES (?,?,?,?)", (result.order_id, executor.now_iso(), result.price, result.size))
+                await storage.execute(
+                    "INSERT INTO fills (order_id, fill_price, fill_size, ts) VALUES (?, ?, ?, ?)",
+                    (result.order_id, result.price, result.size, now_ts),
+                )
                 risk.on_open(settings.order_size_usd)
                 position = Position(
                     market_slug=active_market.market_slug,
@@ -230,13 +260,11 @@ async def run_bot(settings: Settings, max_runtime_seconds: int | None = None) ->
                     order_id=result.order_id,
                 )
                 await storage.execute(
-                    "INSERT INTO positions (market_slug, token_id, entry_price, size, opened_ts, closed_ts, exit_reason) VALUES (?,?,?,?,?,?,?)",
-                    (active_market.market_slug, buy_token_id, limit_price, qty, executor.now_iso(), None, None),
+                    "INSERT INTO positions (token_id, entry_price, size, opened_ts, closed_ts, exit_reason) VALUES (?, ?, ?, ?, ?, ?)",
+                    (buy_token_id, limit_price, qty, now_ts, None, None),
                 )
             if settings.verbose:
-                print(
-                    f"ORDER {signal.decision.value} token={buy_token_id} limit={limit_price:.4f} size={qty:.4f} fill_if={'price>=ask'} status={result.status}"
-                )
+                print(f"TRADE EXECUTED: side=buy price={result.price:.4f} size={result.size:.4f} status={result.status}")
 
             log.info("decision", decision=signal.decision.value, edge=signal.edge, reason=reason)
 
