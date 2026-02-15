@@ -38,6 +38,7 @@ class Settings:
     window_minutes: int
     loop_interval_seconds: float
     rotate_interval_seconds: int
+    quote_print_interval_seconds: int
     paper_fill_epsilon: float
     allow_cross_window_positions: bool
     market_discovery_fallback_seconds: int
@@ -76,6 +77,7 @@ def get_settings() -> Settings:
         window_minutes=int(os.getenv("WINDOW_MINUTES", "5")),
         loop_interval_seconds=float(os.getenv("LOOP_INTERVAL_SECONDS", "1.0")),
         rotate_interval_seconds=int(os.getenv("ROTATE_INTERVAL_SECONDS", "300")),
+        quote_print_interval_seconds=int(os.getenv("QUOTE_PRINT_INTERVAL_SECONDS", "60")),
         paper_fill_epsilon=float(os.getenv("PAPER_FILL_EPSILON", "0.0")),
         allow_cross_window_positions=os.getenv("ALLOW_CROSS_WINDOW_POSITIONS", "false").lower() == "true",
         market_discovery_fallback_seconds=int(os.getenv("MARKET_DISCOVERY_FALLBACK_SECONDS", "120")),

@@ -4,6 +4,7 @@ import asyncio
 from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import math
 
 import structlog
 
@@ -14,6 +15,7 @@ from bot.feeds.binance import BinanceFeed
 from bot.feeds.polymarket_ws import PolymarketMarketFeed
 from bot.model import MomentumVolModel
 from bot.risk import RiskManager
+from bot.report import build_session_report
 from bot.storage import Storage
 from bot.strategy import choose_signal
 from bot.types import Decision, Position
@@ -55,6 +57,8 @@ async def run_bot(settings: Settings, max_runtime_seconds: int | None = None) ->
 
     position: Position | None = None
     stats = Stats(reason_counts=Counter(), edge_up=[], edge_down=[], spread_up=[], spread_down=[])
+    quote_interval = max(settings.quote_print_interval_seconds, 1)
+    last_quote_bucket: int | None = None
 
     async def rotation_loop() -> None:
         nonlocal active_market, last_valid_market, last_market_ok
@@ -88,7 +92,7 @@ async def run_bot(settings: Settings, max_runtime_seconds: int | None = None) ->
                     log.error("market_discovery_failed_expired_fallback", age_seconds=age)
 
     async def decision_loop() -> None:
-        nonlocal position
+        nonlocal position, last_quote_bucket
         while True:
             await asyncio.sleep(settings.loop_interval_seconds)
             ts = datetime.now(timezone.utc).timestamp()
@@ -146,7 +150,12 @@ async def run_bot(settings: Settings, max_runtime_seconds: int | None = None) ->
 
             stats.reason_counts[reason] += 1
 
-            if settings.verbose:
+            quote_bucket = math.floor(ts / quote_interval)
+            should_print_quotes = quote_bucket != last_quote_bucket
+            if should_print_quotes:
+                last_quote_bucket = quote_bucket
+
+            if settings.verbose or should_print_quotes:
                 print(
                     f"[{datetime.now(timezone.utc).isoformat()}] BTC={_fmt(btc_price)} "
                     f"UP(mid={_fmt(up_quote.mid)}, spread={_fmt(up_quote.spread)}) "
@@ -305,3 +314,14 @@ async def run_bot(settings: Settings, max_runtime_seconds: int | None = None) ->
                 spread_up={"min": sup[0], "max": sup[1], "avg": sup[2]},
                 spread_down={"min": sdn[0], "max": sdn[1], "avg": sdn[2]},
             )
+
+        report = build_session_report(settings.sqlite_path, settings.mode.value)
+        print("\n=== Ergebnis ===")
+        print(f"mode={settings.mode.value}")
+        print(f"orders_total={report.total_orders}")
+        print(f"orders_buy={report.buy_orders}")
+        print(f"orders_sell={report.sell_orders}")
+        print(f"fills_total={report.fills_total}")
+        print(f"positions_open={report.open_positions}")
+        print(f"positions_closed={report.closed_positions}")
+        print(f"realized_pnl_usd={report.realized_pnl_usd:.4f}")
