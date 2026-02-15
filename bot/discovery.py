@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import json
+import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from math import ceil
 
 import aiohttp
 
 from bot.config import Settings
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -41,8 +45,8 @@ async def discover_btc_up_down_market(settings: Settings) -> MarketDiscoveryResu
         end_date = market.get("endDate") or market.get("end_date") or now_iso
         if end_date < now_iso:
             continue
-        outcomes = market.get("outcomes") or []
-        clob_ids = market.get("clobTokenIds") or market.get("clob_token_ids") or []
+        outcomes = _ensure_list(market.get("outcomes"))
+        clob_ids = _ensure_list(market.get("clobTokenIds") or market.get("clob_token_ids"))
         if len(outcomes) >= 2 and len(clob_ids) >= 2:
             candidates.append((market, outcomes, clob_ids))
 
@@ -56,6 +60,13 @@ async def discover_btc_up_down_market(settings: Settings) -> MarketDiscoveryResu
     if not up_token_id or not down_token_id:
         return None
 
+    logger.info(
+        "Discovered market %s: UP=%s DOWN=%s via active-scan",
+        str(market.get("slug", "unknown")),
+        up_token_id,
+        down_token_id,
+    )
+
     return MarketDiscoveryResult(
         market_slug=str(market.get("slug", "unknown")),
         up_token_id=str(up_token_id),
@@ -64,11 +75,18 @@ async def discover_btc_up_down_market(settings: Settings) -> MarketDiscoveryResu
 
 
 async def _discover_scheduled_market(session: aiohttp.ClientSession, settings: Settings) -> MarketDiscoveryResult | None:
-    window_seconds = max(settings.window_minutes, 1) * 60
+    _ = settings
+    window_seconds = 5 * 60
     now_ts = int(datetime.now(timezone.utc).timestamp())
-    next_window_ts = int(ceil(now_ts / window_seconds) * window_seconds)
+    current_window_ts = (now_ts // window_seconds) * window_seconds
 
-    candidate_timestamps = [next_window_ts, next_window_ts + window_seconds, next_window_ts - window_seconds]
+    candidate_timestamps = [
+        current_window_ts,
+        current_window_ts + window_seconds,
+        current_window_ts - window_seconds,
+        current_window_ts + (2 * window_seconds),
+        current_window_ts - (2 * window_seconds),
+    ]
     seen: set[int] = set()
 
     for unix_ts in candidate_timestamps:
@@ -89,7 +107,7 @@ async def _discover_scheduled_market(session: aiohttp.ClientSession, settings: S
 
 
 async def _fetch_event_by_slug(session: aiohttp.ClientSession, slug: str) -> dict | None:
-    url = f"https://gamma-api.polymarket.com/events/{slug}"
+    url = f"https://gamma-api.polymarket.com/events/slug/{slug}"
     try:
         async with session.get(url, timeout=20) as resp:
             if resp.status == 404:
@@ -108,14 +126,15 @@ async def _fetch_event_by_slug(session: aiohttp.ClientSession, slug: str) -> dic
 def _extract_market_tokens(event: dict) -> MarketDiscoveryResult | None:
     markets = event.get("markets") or []
     for market in markets:
-        outcomes = market.get("outcomes") or []
-        clob_ids = market.get("clobTokenIds") or market.get("clob_token_ids") or []
+        outcomes = _ensure_list(market.get("outcomes"))
+        clob_ids = _ensure_list(market.get("clobTokenIds") or market.get("clob_token_ids"))
         pairs = list(zip(outcomes, clob_ids))
 
         up_token_id = next((tid for name, tid in pairs if "up" in str(name).lower()), None)
         down_token_id = next((tid for name, tid in pairs if "down" in str(name).lower()), None)
         if up_token_id and down_token_id:
             market_slug = str(market.get("slug") or event.get("slug") or "unknown")
+            logger.info("Discovered market %s: UP=%s DOWN=%s via event-slug", market_slug, up_token_id, down_token_id)
             return MarketDiscoveryResult(market_slug=market_slug, up_token_id=str(up_token_id), down_token_id=str(down_token_id))
 
     return None
@@ -130,3 +149,18 @@ async def _fetch_active_markets(session: aiohttp.ClientSession) -> list[dict]:
         payload = await resp.json()
 
     return payload if isinstance(payload, list) else []
+
+
+def _ensure_list(value: object) -> list:
+    if isinstance(value, list):
+        return value
+    if isinstance(value, str):
+        candidate = value.strip()
+        if not candidate:
+            return []
+        try:
+            decoded = json.loads(candidate)
+        except json.JSONDecodeError:
+            return []
+        return decoded if isinstance(decoded, list) else []
+    return []
