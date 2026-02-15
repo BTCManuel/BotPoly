@@ -36,6 +36,9 @@ class MarketQuote:
 class Signal:
     p_up_model: float
     p_up_mkt: float
+    p_down_mkt: float
+    edge_up: float
+    edge_down: float
     edge: float
     decision: Decision
     reason_code: str
@@ -43,6 +46,7 @@ class Signal:
 
 @dataclass(slots=True)
 class Position:
+    market_slug: str
     token_id: str
     qty: float
     entry_price: float

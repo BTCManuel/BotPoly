@@ -1,17 +1,17 @@
-# Polymarket BTC 5m Up/Down Bot (MVP)
+# Polymarket BTC 5m Up/Down Bot (MVP+)
 
 Async Python 3.11+ Bot für den **Polymarket Bitcoin Up/Down 5-Minuten-Markt**.
 
 ## Features
 - Binance BTCUSDT Trade-Feed (WebSocket)
 - Polymarket CLOB Market-Feed (WebSocket)
-- Auto Market Discovery (mit Fallback auf `.env` Token IDs)
+- Auto Market Discovery **und automatische Market-Rotation** (5-Min-Fenster)
+- Live Decision-Snapshots in der Konsole (`--verbose`)
 - Einfache, robuste Signal-Logik (Momentum + Realized Volatility)
-- Nur LIMIT Orders
 - `paper` (default) + optional `live`
 - Risk Controls: max exposure, cooldown, daily loss kill switch
 - Exit-Logik: Profit-Take + Time-Stop
-- SQLite Speicherung: ticks, orders, fills, pnl, errors
+- SQLite Speicherung: ticks, orders, fills, positions, pnl, errors
 - Retry/Reconnect mit `tenacity`
 
 ## Installation
@@ -25,61 +25,57 @@ cp .env.example .env
 ## Konfiguration
 Alle Secrets **nur via ENV** (`.env`).
 
-Wichtig:
-- Standard ist `MODE=paper`.
-- Für Live Trading sind mindestens `POLY_PRIVATE_KEY` (+ idealerweise L2 API Credentials) nötig.
-- Falls Discovery keinen Markt findet: `UP_TOKEN_ID` + `DOWN_TOKEN_ID` setzen.
+Wichtige Parameter für Debug/Trading-Frequenz:
+- `EDGE_MIN` (z. B. `0.01` bis `0.04`)
+- `MAX_SPREAD` (z. B. `0.02` bis `0.03`)
+- `LOOP_INTERVAL_SECONDS` (default `1.0`)
+- `ROTATE_INTERVAL_SECONDS` (default `300`)
+- `PAPER_FILL_EPSILON` (default `0.0`)
+- `ALLOW_CROSS_WINDOW_POSITIONS` (default `false`)
+- `MARKET_DISCOVERY_FALLBACK_SECONDS` (default `120`)
 
 ## Start
 ```bash
-python -m bot run
-```
-oder explizit:
-```bash
-python -m bot run --mode paper
-python -m bot run --mode live
+python -m bot run --mode paper --hours 0.17 --verbose
 ```
 
-Zeitlich begrenzt laufen lassen (z. B. 1h / 24h):
+oder explizit live:
 ```bash
-python -m bot run --mode paper --hours 1
-python -m bot run --mode paper --hours 24
+python -m bot run --mode live --hours 1
 ```
 
-Einfache Ergebnis-Auswertung (Orders + Realized PnL):
+Ergebnis-Auswertung:
 ```bash
 python -m bot report --mode paper
 ```
 
-## Discovery: Token IDs
-1. Bot versucht zuerst den **5m-Event-Slug per Unix-Zeit** zu treffen (`btc-updown-5m-<timestamp>`) und prüft aktuelle/nahe 5-Minuten-Fenster.
-2. Erkennt die Token IDs aus Outcomes (`up`, `down`).
-3. Fallback: aktive BTC Up/Down Märkte über die Gamma Markets API durchsuchen.
-4. Falls fehlerhaft/mehrdeutig: manuell in `.env` setzen (`UP_TOKEN_ID`, `DOWN_TOKEN_ID`).
+## Market Rotation
+- Der Bot discovered initial den aktiven `btc-updown-5m-<unix_ts>` Markt.
+- Danach läuft ein Scheduler (`ROTATE_INTERVAL_SECONDS`), der den Markt neu discovered.
+- Bei Wechsel wird `market_rotated` geloggt (alter/neuer slug + token ids).
+- Offene Positionen bleiben gemanagt; neue Trades nutzen den neuen Markt.
 
-## Trading-Logik (MVP)
-- Modell erzeugt `p_up_model` aus BTC Momentum + Volatilität.
-- Marktwahrscheinlichkeit `p_up_mkt` aus Up-Mid-Price.
-- Trade nur wenn:
-  - `edge >= EDGE_MIN`
-  - `spread <= MAX_SPREAD`
-- Nur LIMIT Buy/Sell.
-- Exit:
-  - Profit-Take bei `PROFIT_TAKE_BPS`
-  - oder `TIME_STOP_SECONDS`.
+## Warum ggf. 0 Trades?
+Wenn `orders_total=0`, nutze `--verbose` und prüfe Reason-Codes pro Tick:
+- `edge_too_low`
+- `spread_too_wide`
+- `cooldown_active`
+- `max_exposure_hit`
+- `daily_loss_limit_hit`
+- `position_open_old_window`
 
-## Safety / Risk
-- Default konservativ (`ORDER_SIZE_USD=10`, `MAX_POSITION_USD=30`).
-- Kill Switch: `DAILY_LOSS_LIMIT_USD`.
-- Cooldown zwischen neuen Positionen: `COOLDOWN_SECONDS`.
-- **Empfehlung live**: separates Bot-Wallet, sehr kleines Startkapital, enges Monitoring.
+Wenn während Laufzeit kein Entry-Signal entsteht, schreibt der Bot am Ende ein `no_trades_summary` mit:
+- reason breakdown
+- min/max/avg von Edge_UP/Edge_DOWN
+- min/max/avg von Spread_UP/Spread_DOWN
 
 ## Datenbank
 Default: `bot.db`
 Tabellen:
-- `ticks`
+- `ticks` (Decision Snapshots)
 - `orders`
 - `fills`
+- `positions`
 - `pnl`
 - `errors`
 
