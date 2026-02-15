@@ -5,6 +5,7 @@ from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import math
+import traceback
 
 import structlog
 
@@ -62,7 +63,7 @@ async def run_bot(settings: Settings, max_runtime_seconds: int | None = None) ->
 
     position: Position | None = None
     stats = Stats(reason_counts=Counter(), edge_up=[], edge_down=[], spread_up=[], spread_down=[])
-    quote_interval = max(settings.quote_print_interval_seconds, 1)
+    quote_interval = 60
     last_quote_bucket: int | None = None
 
     async def rotation_loop() -> None:
@@ -113,30 +114,36 @@ async def run_bot(settings: Settings, max_runtime_seconds: int | None = None) ->
             if not btc_price or not up_quote or not down_quote:
                 reason = "no_orderbook"
                 stats.reason_counts[reason] += 1
+                poly_last_msg_age_s = poly.last_msg_age_seconds
                 await storage.execute(
                     "INSERT INTO ticks (ts, btc_price, up_mid, down_mid, p_model, decision, edge, reason) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                     (ts, btc_price or 0.0, 0.0, 0.0, 0.0, Decision.HOLD.value, 0.0, reason),
                 )
                 if settings.verbose or should_print_quotes:
+                    last_msg_age_text = f"{poly_last_msg_age_s:.1f}" if poly_last_msg_age_s is not None else "na"
                     print(
                         f"[{datetime.now(timezone.utc).isoformat()}] BTC={_fmt(btc_price or 0.0)} "
-                        "UP(mid=0.0000, spread=0.0000) DOWN(mid=0.0000, spread=0.0000) "
-                        "p_model=0.0000 edge_up=0.0000 edge_down=0.0000 decision=hold reason=no_orderbook"
+                        "UP(bid=0.0000, ask=0.0000) DOWN(bid=0.0000, ask=0.0000) "
+                        "p_model=0.0000 edge_up=0.0000 edge_down=0.0000 decision=hold reason=no_orderbook "
+                        f"poly_last_msg_age_s={last_msg_age_text} poly_msg_count_total={poly.msg_count_total}"
                     )
                 continue
 
             if up_quote.bid is None or up_quote.ask is None or down_quote.bid is None or down_quote.ask is None:
                 reason = "no_orderbook"
                 stats.reason_counts[reason] += 1
+                poly_last_msg_age_s = poly.last_msg_age_seconds
                 await storage.execute(
                     "INSERT INTO ticks (ts, btc_price, up_mid, down_mid, p_model, decision, edge, reason) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                     (ts, btc_price, 0.0, 0.0, 0.0, Decision.HOLD.value, 0.0, reason),
                 )
                 if settings.verbose or should_print_quotes:
+                    last_msg_age_text = f"{poly_last_msg_age_s:.1f}" if poly_last_msg_age_s is not None else "na"
                     print(
                         f"[{datetime.now(timezone.utc).isoformat()}] BTC={_fmt(btc_price)} "
-                        "UP(mid=0.0000, spread=0.0000) DOWN(mid=0.0000, spread=0.0000) "
-                        "p_model=0.0000 edge_up=0.0000 edge_down=0.0000 decision=hold reason=no_orderbook"
+                        "UP(bid=0.0000, ask=0.0000) DOWN(bid=0.0000, ask=0.0000) "
+                        "p_model=0.0000 edge_up=0.0000 edge_down=0.0000 decision=hold reason=no_orderbook "
+                        f"poly_last_msg_age_s={last_msg_age_text} poly_msg_count_total={poly.msg_count_total}"
                     )
                 continue
 
@@ -169,8 +176,8 @@ async def run_bot(settings: Settings, max_runtime_seconds: int | None = None) ->
             if settings.verbose or should_print_quotes:
                 print(
                     f"[{datetime.now(timezone.utc).isoformat()}] BTC={_fmt(btc_price)} "
-                    f"UP(mid={_fmt(up_quote.mid)}, spread={_fmt(up_quote.spread)}) "
-                    f"DOWN(mid={_fmt(down_quote.mid)}, spread={_fmt(down_quote.spread)}) "
+                    f"UP(bid={_fmt(up_quote.bid)}, ask={_fmt(up_quote.ask)}) "
+                    f"DOWN(bid={_fmt(down_quote.bid)}, ask={_fmt(down_quote.ask)}) "
                     f"p_model={_fmt(signal.p_up_model)} edge_up={_fmt(signal.edge_up)} edge_down={_fmt(signal.edge_down)} "
                     f"decision={signal.decision.value} reason={reason}"
                 )
@@ -289,7 +296,9 @@ async def run_bot(settings: Settings, max_runtime_seconds: int | None = None) ->
             log.info("decision", decision=signal.decision.value, edge=signal.edge, reason=reason)
 
     def _track_task(name: str, task: asyncio.Task[None]) -> None:
-        if settings.verbose or settings.log_level.upper() == "DEBUG":
+        if name == "polymarket_feed":
+            log.info("polymarket_feed_started")
+        elif settings.verbose or settings.log_level.upper() == "DEBUG":
             log.info(f"{name}_started")
 
         def _on_done(done: asyncio.Task[None]) -> None:
@@ -297,7 +306,11 @@ async def run_bot(settings: Settings, max_runtime_seconds: int | None = None) ->
                 return
             exc = done.exception()
             if exc is not None:
-                log.error(f"{name}_crashed", error=str(exc))
+                log.error(
+                    f"{name}_crashed",
+                    error=repr(exc),
+                    traceback="".join(traceback.format_exception(type(exc), exc, exc.__traceback__)),
+                )
 
         task.add_done_callback(_on_done)
 
