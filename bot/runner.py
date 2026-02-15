@@ -46,7 +46,12 @@ async def run_bot(settings: Settings, max_runtime_seconds: int | None = None) ->
     log.info("market_selected", slug=discovered.market_slug, up_token=discovered.up_token_id, down_token=discovered.down_token_id)
 
     binance = BinanceFeed(settings.binance_ws_url)
-    poly = PolymarketMarketFeed(settings.poly_ws_url, discovered.up_token_id, discovered.down_token_id)
+    poly = PolymarketMarketFeed(
+        settings.poly_ws_url,
+        discovered.up_token_id,
+        discovered.down_token_id,
+        verbose=settings.verbose,
+    )
     model = MomentumVolModel(settings.momentum_window, settings.vol_window)
     risk = RiskManager(settings.max_position_usd, settings.daily_loss_limit_usd, settings.cooldown_seconds)
     executor = Executor(settings)
@@ -100,6 +105,11 @@ async def run_bot(settings: Settings, max_runtime_seconds: int | None = None) ->
 
             up_quote = poly.up_quote
             down_quote = poly.down_quote
+            quote_bucket = math.floor(ts / quote_interval)
+            should_print_quotes = quote_bucket != last_quote_bucket
+            if should_print_quotes:
+                last_quote_bucket = quote_bucket
+
             if not btc_price or not up_quote or not down_quote:
                 reason = "no_orderbook"
                 stats.reason_counts[reason] += 1
@@ -107,7 +117,7 @@ async def run_bot(settings: Settings, max_runtime_seconds: int | None = None) ->
                     "INSERT INTO ticks (ts, btc_price, up_mid, down_mid, p_model, decision, edge, reason) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                     (ts, btc_price or 0.0, 0.0, 0.0, 0.0, Decision.HOLD.value, 0.0, reason),
                 )
-                if settings.verbose:
+                if settings.verbose or should_print_quotes:
                     print(
                         f"[{datetime.now(timezone.utc).isoformat()}] BTC={_fmt(btc_price or 0.0)} "
                         "UP(mid=0.0000, spread=0.0000) DOWN(mid=0.0000, spread=0.0000) "
@@ -122,6 +132,12 @@ async def run_bot(settings: Settings, max_runtime_seconds: int | None = None) ->
                     "INSERT INTO ticks (ts, btc_price, up_mid, down_mid, p_model, decision, edge, reason) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                     (ts, btc_price, 0.0, 0.0, 0.0, Decision.HOLD.value, 0.0, reason),
                 )
+                if settings.verbose or should_print_quotes:
+                    print(
+                        f"[{datetime.now(timezone.utc).isoformat()}] BTC={_fmt(btc_price)} "
+                        "UP(mid=0.0000, spread=0.0000) DOWN(mid=0.0000, spread=0.0000) "
+                        "p_model=0.0000 edge_up=0.0000 edge_down=0.0000 decision=hold reason=no_orderbook"
+                    )
                 continue
 
             p_model = model.predict_up_probability(binance.prices)
@@ -149,11 +165,6 @@ async def run_bot(settings: Settings, max_runtime_seconds: int | None = None) ->
                 reason = risk_reason
 
             stats.reason_counts[reason] += 1
-
-            quote_bucket = math.floor(ts / quote_interval)
-            should_print_quotes = quote_bucket != last_quote_bucket
-            if should_print_quotes:
-                last_quote_bucket = quote_bucket
 
             if settings.verbose or should_print_quotes:
                 print(
@@ -277,12 +288,30 @@ async def run_bot(settings: Settings, max_runtime_seconds: int | None = None) ->
 
             log.info("decision", decision=signal.decision.value, edge=signal.edge, reason=reason)
 
-    tasks = [
-        asyncio.create_task(binance.run()),
-        asyncio.create_task(poly.run()),
-        asyncio.create_task(rotation_loop()),
-        asyncio.create_task(decision_loop()),
-    ]
+    def _track_task(name: str, task: asyncio.Task[None]) -> None:
+        if settings.verbose or settings.log_level.upper() == "DEBUG":
+            log.info(f"{name}_started")
+
+        def _on_done(done: asyncio.Task[None]) -> None:
+            if done.cancelled():
+                return
+            exc = done.exception()
+            if exc is not None:
+                log.error(f"{name}_crashed", error=str(exc))
+
+        task.add_done_callback(_on_done)
+
+    binance_task = asyncio.create_task(binance.run(), name="binance_feed")
+    poly_task = asyncio.create_task(poly.run(), name="polymarket_feed")
+    rotation_task = asyncio.create_task(rotation_loop(), name="rotation_loop")
+    decision_task = asyncio.create_task(decision_loop(), name="decision_loop")
+
+    _track_task("binance_feed", binance_task)
+    _track_task("polymarket_feed", poly_task)
+    _track_task("rotation_loop", rotation_task)
+    _track_task("decision_loop", decision_task)
+
+    tasks = [binance_task, poly_task, rotation_task, decision_task]
     try:
         if max_runtime_seconds and max_runtime_seconds > 0:
             await asyncio.sleep(max_runtime_seconds)
