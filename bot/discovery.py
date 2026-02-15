@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from math import ceil
 
 import aiohttp
 
@@ -23,14 +24,14 @@ async def discover_btc_up_down_market(settings: Settings) -> MarketDiscoveryResu
             down_token_id=settings.down_token_id,
         )
 
-    now_iso = datetime.now(timezone.utc).isoformat()
-    url = "https://gamma-api.polymarket.com/markets"
-    params = {"active": "true", "limit": "200"}
-
     async with aiohttp.ClientSession() as session:
-        async with session.get(url, params=params, timeout=20) as resp:
-            resp.raise_for_status()
-            data = await resp.json()
+        scheduled_market = await _discover_scheduled_market(session, settings)
+        if scheduled_market:
+            return scheduled_market
+
+        data = await _fetch_active_markets(session)
+
+    now_iso = datetime.now(timezone.utc).isoformat()
 
     candidates = []
     for market in data:
@@ -60,3 +61,72 @@ async def discover_btc_up_down_market(settings: Settings) -> MarketDiscoveryResu
         up_token_id=str(up_token_id),
         down_token_id=str(down_token_id),
     )
+
+
+async def _discover_scheduled_market(session: aiohttp.ClientSession, settings: Settings) -> MarketDiscoveryResult | None:
+    window_seconds = max(settings.window_minutes, 1) * 60
+    now_ts = int(datetime.now(timezone.utc).timestamp())
+    next_window_ts = int(ceil(now_ts / window_seconds) * window_seconds)
+
+    candidate_timestamps = [next_window_ts, next_window_ts + window_seconds, next_window_ts - window_seconds]
+    seen: set[int] = set()
+
+    for unix_ts in candidate_timestamps:
+        if unix_ts in seen or unix_ts <= 0:
+            continue
+        seen.add(unix_ts)
+
+        slug = f"btc-updown-5m-{unix_ts}"
+        event = await _fetch_event_by_slug(session, slug)
+        if not event:
+            continue
+
+        result = _extract_market_tokens(event)
+        if result:
+            return result
+
+    return None
+
+
+async def _fetch_event_by_slug(session: aiohttp.ClientSession, slug: str) -> dict | None:
+    url = f"https://gamma-api.polymarket.com/events/{slug}"
+    try:
+        async with session.get(url, timeout=20) as resp:
+            if resp.status == 404:
+                return None
+            resp.raise_for_status()
+            payload = await resp.json()
+    except (aiohttp.ClientError, TimeoutError):
+        return None
+
+    if isinstance(payload, dict):
+        return payload
+
+    return None
+
+
+def _extract_market_tokens(event: dict) -> MarketDiscoveryResult | None:
+    markets = event.get("markets") or []
+    for market in markets:
+        outcomes = market.get("outcomes") or []
+        clob_ids = market.get("clobTokenIds") or market.get("clob_token_ids") or []
+        pairs = list(zip(outcomes, clob_ids))
+
+        up_token_id = next((tid for name, tid in pairs if "up" in str(name).lower()), None)
+        down_token_id = next((tid for name, tid in pairs if "down" in str(name).lower()), None)
+        if up_token_id and down_token_id:
+            market_slug = str(market.get("slug") or event.get("slug") or "unknown")
+            return MarketDiscoveryResult(market_slug=market_slug, up_token_id=str(up_token_id), down_token_id=str(down_token_id))
+
+    return None
+
+
+async def _fetch_active_markets(session: aiohttp.ClientSession) -> list[dict]:
+    url = "https://gamma-api.polymarket.com/markets"
+    params = {"active": "true", "limit": "200"}
+
+    async with session.get(url, params=params, timeout=20) as resp:
+        resp.raise_for_status()
+        payload = await resp.json()
+
+    return payload if isinstance(payload, list) else []

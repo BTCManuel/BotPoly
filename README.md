@@ -52,9 +52,10 @@ python -m bot report --mode paper
 ```
 
 ## Discovery: Token IDs
-1. Bot versucht automatisch aktive BTC Up/Down Märkte über Gamma API zu finden.
+1. Bot versucht zuerst den **5m-Event-Slug per Unix-Zeit** zu treffen (`btc-updown-5m-<timestamp>`) und prüft aktuelle/nahe 5-Minuten-Fenster.
 2. Erkennt die Token IDs aus Outcomes (`up`, `down`).
-3. Falls fehlerhaft/mehrdeutig: manuell in `.env` setzen (`UP_TOKEN_ID`, `DOWN_TOKEN_ID`).
+3. Fallback: aktive BTC Up/Down Märkte über die Gamma Markets API durchsuchen.
+4. Falls fehlerhaft/mehrdeutig: manuell in `.env` setzen (`UP_TOKEN_ID`, `DOWN_TOKEN_ID`).
 
 ## Trading-Logik (MVP)
 - Modell erzeugt `p_up_model` aus BTC Momentum + Volatilität.
